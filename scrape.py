@@ -5,7 +5,8 @@ from: https://www.dol.gov/agencies/eta/foreign-labor/performance
 Features:
 - Groups files by Program // Year // File
 - Deduplicates using manifest.json
-- Marks and separates legacy “Annual Report” data
+- Skips deprecated Annual Reports
+- Enhanced debugging to catch missing files
 """
 
 import os
@@ -23,12 +24,30 @@ from datetime import datetime, timezone
 
 BASE_URL = "https://www.dol.gov/agencies/eta/foreign-labor/performance"
 SAVE_DIR = "data"
-VALID_EXTS = (".xlsx", ".csv", ".pdf", ".docx", ".doc", ".zip")
+VALID_EXTS = (".xlsx", ".csv", ".pdf", ".docx", ".doc", ".zip", ".xls")
+
+# Skip deprecated annual reports
+SKIP_PATTERNS = [
+    "annual performance report",
+    "fy 2016 report",
+    "fy 2015 report",
+    "fy 2014 report",
+    "fy 2013 report",
+    "fy 2012 report",
+    "fy 2011 report",
+    "fy 2010 report",
+    "fy 2009 report",
+    "fy 2007 report",
+    "fy 2006 report",
+]
 
 PROGRAM_MAP = {
     "perm": "PERM Program",
     "lca": "LCA Program",
+    "h-1b": "LCA Program",
+    "h1b": "LCA Program",
     "pw": "Prevailing Wage Program",
+    "prevailing": "Prevailing Wage Program",
     "h-2a": "H-2A Program",
     "h2a": "H-2A Program",
     "h-2b": "H-2B Program",
@@ -78,8 +97,6 @@ def clean_program_name(name):
     name = re.sub(r"[\\/*?:\"<>|]", "_", name.strip())
     if len(name) > 80:
         name = name[:80]
-    if "office" in name.lower() and "program" not in name.lower():
-        name = "Miscellaneous OFLC Data"
     return name
 
 def extract_year(filename):
@@ -90,6 +107,85 @@ def extract_year(filename):
         return f"20{token}" if len(token) == 2 else token
     match = re.search(r"(19|20)\d{2}", filename)
     return match.group(0) if match else "unknown_year"
+
+def detect_program_from_filename(filename):
+    """Detect program from filename as fallback."""
+    filename_lower = filename.lower()
+    
+    # Check each program pattern
+    for key, val in PROGRAM_MAP.items():
+        if key in filename_lower:
+            return val
+    
+    return None
+
+def should_skip_file(filename, text_context=""):
+    """Check if file should be skipped (deprecated annual reports)."""
+    combined = (filename + " " + text_context).lower()
+    
+    # Skip if it matches deprecated patterns (but not "record layout" PDFs)
+    if "record layout" not in combined and "record_layout" not in combined:
+        for pattern in SKIP_PATTERNS:
+            if pattern in combined:
+                return True
+        
+        # Skip PDF annual reports specifically (but not layouts)
+        if "annual" in combined and "report" in combined and filename.lower().endswith(".pdf"):
+            return True
+    
+    return False
+
+def parse_table_links(soup):
+    """Parse download links from table format (used in Latest Quarterly Updates)."""
+    table_links = []
+    
+    for table in soup.find_all("table"):
+        for row in table.find_all("tr"):
+            cells = row.find_all("td")
+            if len(cells) < 2:
+                continue
+            
+            # First cell typically has program name
+            program_cell = cells[0].get_text(strip=True)
+            
+            # Remaining cells have file links
+            for cell in cells[1:]:
+                for link in cell.find_all("a", href=True):
+                    href = link["href"]
+                    if not any(href.lower().endswith(ext) for ext in VALID_EXTS):
+                        continue
+                    
+                    filename = href.split("/")[-1]
+                    
+                    # Skip deprecated files
+                    if should_skip_file(filename, program_cell):
+                        print(f"[TABLE] Skipping deprecated: {filename}")
+                        continue
+                    
+                    full_url = urljoin(BASE_URL, href)
+                    year = extract_year(filename)
+                    
+                    # Detect program from table cell or filename
+                    current_program = None
+                    for key, val in PROGRAM_MAP.items():
+                        if key in program_cell.lower() or key in filename.lower():
+                            current_program = val
+                            break
+                    
+                    if not current_program:
+                        current_program = detect_program_from_filename(filename)
+                    
+                    if not current_program:
+                        current_program = "Uncategorized"
+                    
+                    table_links.append({
+                        "program": current_program,
+                        "url": normalize_url(full_url),
+                        "filename": filename,
+                        "year": year
+                    })
+    
+    return table_links
 
 # ---------------------------------------------------------------------
 # Scrape setup
@@ -102,51 +198,87 @@ soup = BeautifulSoup(response.text, "html.parser")
 manifest = load_manifest()
 download_links = []
 current_program = None
+skip_mode = False
 
 # ---------------------------------------------------------------------
 # Parse HTML and collect download links
 # ---------------------------------------------------------------------
 
-for element in soup.find_all(["strong", "b", "h3", "a"]):
-    text = element.get_text(strip=True) if element else ""
-    lower_text = text.lower()
+# First, parse table-based links (Latest Quarterly Updates)
+table_links = parse_table_links(soup)
+print(f"Found {len(table_links)} files from tables.")
+download_links.extend(table_links)
 
-    # detect program or legacy sections
-    if "annual report" in lower_text:
-        current_program = "Legacy Annual Reports"
-        print(f"[Detected Legacy Section]: {current_program}")
-    elif any(k in lower_text for k in ["program", "disclosure", "oflc"]):
-        current_program = clean_program_name(text)
-        print(f"[Detected Program Section]: {current_program}")
+# Then parse ALL links on the page and intelligently categorize them
+print("\nScanning all links on page...")
+all_links = soup.find_all("a", href=True)
 
-    # detect file links
-    elif element.name == "a" and element.has_attr("href") and current_program:
-        href = element["href"].lower()
-        if not any(href.endswith(ext) for ext in VALID_EXTS):
-            continue
-
-        full_url = urljoin(BASE_URL, href)
-        filename = href.split("/")[-1]
-        year = extract_year(filename)
-
-        # normalize program name
-        for key, val in PROGRAM_MAP.items():
-            if key in current_program.lower():
-                current_program = val
+for link in all_links:
+    href = link["href"]
+    href_lower = href.lower()
+    
+    # Check if it's a valid file type
+    if not any(href_lower.endswith(ext) for ext in VALID_EXTS):
+        continue
+    
+    filename = href.split("/")[-1]
+    
+    # Skip deprecated files
+    if should_skip_file(filename):
+        continue
+    
+    # Try to detect program from filename
+    program = detect_program_from_filename(filename)
+    
+    # If no program detected, try to look at surrounding context
+    if not program:
+        # Look at parent elements for context
+        parent = link.find_parent(["td", "p", "li", "div"])
+        if parent:
+            context = parent.get_text(strip=True)
+            for key, val in PROGRAM_MAP.items():
+                if key in context.lower():
+                    program = val
+                    break
+    
+    # Look backwards in the document for the nearest heading
+    if not program:
+        # Find the nearest preceding heading
+        for prev in link.find_all_previous(["h2", "h3", "h4", "strong", "b"]):
+            text = prev.get_text(strip=True).lower()
+            for key, val in PROGRAM_MAP.items():
+                if key in text and "annual" not in text:
+                    program = val
+                    break
+            if program:
                 break
+    
+    if not program:
+        program = "Uncategorized"
+    
+    full_url = urljoin(BASE_URL, href)
+    normalized_url = normalize_url(full_url)
+    year = extract_year(filename)
+    
+    # Check if we already have this URL
+    if any(item["url"] == normalized_url for item in download_links):
+        continue
+    
+    download_links.append({
+        "program": program,
+        "url": normalized_url,
+        "filename": filename,
+        "year": year
+    })
 
-        download_links.append({
-            "program": current_program,
-            "url": normalize_url(full_url),
-            "filename": filename,
-            "year": year
-        })
-
-print(f"\nFound {len(download_links)} total downloadable files.")
+print(f"\nFound {len(download_links)} total downloadable files (excluding deprecated annual reports).")
 
 # ---------------------------------------------------------------------
 # Download files (with deduplication)
 # ---------------------------------------------------------------------
+
+downloaded_count = 0
+skipped_count = 0
 
 for item in download_links:
     program = item["program"]
@@ -155,6 +287,8 @@ for item in download_links:
     year = item["year"]
 
     safe_program = clean_program_name(program)
+    
+    # Always use Program/Year/File hierarchy
     program_dir = os.path.join(SAVE_DIR, safe_program)
     year_dir = os.path.join(program_dir, year)
     os.makedirs(year_dir, exist_ok=True)
@@ -169,22 +303,22 @@ for item in download_links:
 
             cached = manifest[url]
             if etag and cached.get("etag") == etag:
-                print(f"Skipping (unchanged ETag): {url}")
+                skipped_count += 1
                 continue
             if last_modified and cached.get("last_modified") == last_modified:
-                print(f"Skipping (unchanged Last-Modified): {url}")
+                skipped_count += 1
                 continue
         except Exception:
-            print(f"Skipping (manifested but couldn't verify freshness): {url}")
+            skipped_count += 1
             continue
 
     # also skip if same file path already stored
     if any(entry.get("saved_path") == filepath for entry in manifest.values()):
-        print(f"Skipping (duplicate file path): {filepath}")
+        skipped_count += 1
         continue
 
     # download
-    print(f"Downloading ({safe_program}, {year}): {url}")
+    print(f"Downloading ({safe_program}/{year}): {filename}")
     try:
         r = requests.get(url, timeout=30)
         r.raise_for_status()
@@ -193,7 +327,6 @@ for item in download_links:
             f.write(r.content)
 
         digest = hashlib.sha256(r.content).hexdigest()
-        status = "legacy" if "legacy" in safe_program.lower() else "active"
 
         manifest[url] = {
             "program": safe_program,
@@ -202,21 +335,26 @@ for item in download_links:
             "saved_path": filepath,
             "sha256": digest,
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "status": status,
             "etag": r.headers.get("ETag"),
             "last_modified": r.headers.get("Last-Modified"),
         }
 
         # save manifest immediately (so crash-safe)
         save_manifest(manifest)
-        print(f"Saved to: {filepath}")
+        print(f"✓ Saved to: {filepath}")
+        downloaded_count += 1
 
     except Exception as e:
-        print(f"Failed to download {url}: {e}")
+        print(f"✗ Failed to download {url}: {e}")
 
 # ---------------------------------------------------------------------
 # Wrap-up
 # ---------------------------------------------------------------------
 
 save_manifest(manifest)
-print("\nCompleted incremental scrape. Manifest updated.")
+print(f"\n{'='*60}")
+print(f"Scrape completed!")
+print(f"Downloaded: {downloaded_count} files")
+print(f"Skipped: {skipped_count} files")
+print(f"Total in manifest: {len(manifest)} files")
+print(f"{'='*60}")
