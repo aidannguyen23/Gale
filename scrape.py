@@ -6,7 +6,9 @@ Features:
 - Groups files by Program // Year // File
 - Deduplicates using manifest.json
 - Skips deprecated Annual Reports
-- Enhanced debugging to catch missing files
+- Atomic writes with rollback support
+- Versioned logging
+- Manifest recovery (delegates cleanup to cleanup.py)
 """
 
 import os
@@ -14,9 +16,14 @@ import re
 import json
 import hashlib
 import requests
+import shutil
+import logging
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlsplit, urlunsplit
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import Dict, Optional
+import tempfile
 
 # ---------------------------------------------------------------------
 # Configuration
@@ -58,6 +65,44 @@ PROGRAM_MAP = {
 
 os.makedirs(SAVE_DIR, exist_ok=True)
 manifest_path = os.path.join(SAVE_DIR, "manifest.json")
+log_dir = os.path.join(SAVE_DIR, "logs")
+os.makedirs(log_dir, exist_ok=True)
+
+# ---------------------------------------------------------------------
+# Logging Setup
+# ---------------------------------------------------------------------
+
+def setup_logging():
+    """Setup versioned logging to file and console."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = os.path.join(log_dir, f"scrape_{timestamp}.log")
+    
+    logger = logging.getLogger("scraper")
+    logger.setLevel(logging.DEBUG)
+    logger.handlers = []
+    
+    # File handler with detailed format
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setLevel(logging.DEBUG)
+    file_formatter = logging.Formatter(
+        '%(asctime)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    file_handler.setFormatter(file_formatter)
+    
+    # Console handler with simpler format
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_formatter = logging.Formatter('%(message)s')
+    console_handler.setFormatter(console_formatter)
+    
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+    
+    logger.info(f"Logging to: {log_file}")
+    return logger
+
+logger = setup_logging()
 
 # ---------------------------------------------------------------------
 # Utilities
@@ -74,23 +119,77 @@ def normalize_url(url: str) -> str:
         parsed.fragment,
     ))
 
-def load_manifest():
-    """Load manifest.json if it exists, else return empty dict."""
+def load_manifest() -> Dict:
+    """
+    Load manifest.json with fallback to backup.
+    
+    Note: Manifest validation/cleanup is handled by cleanup.py.
+    This function just loads the manifest or creates empty one.
+    """
+    # Try primary manifest
     if os.path.exists(manifest_path):
-        with open(manifest_path, "r") as f:
-            try:
-                data = json.load(f)
-                print(f"Loaded {len(data)} entries from manifest.")
-                return data
-            except json.JSONDecodeError:
-                print("Manifest corrupted — resetting.")
-                return {}
+        try:
+            with open(manifest_path, "r") as f:
+                manifest = json.load(f)
+                logger.info(f"Loaded {len(manifest)} entries from manifest")
+                return manifest
+        except json.JSONDecodeError as e:
+            logger.error(f"Manifest corrupted: {e}")
+            
+            # Try backup
+            backup_path = f"{manifest_path}.bak"
+            if os.path.exists(backup_path):
+                logger.info("Attempting to restore from backup...")
+                try:
+                    with open(backup_path, "r") as f:
+                        manifest = json.load(f)
+                        logger.info(f"Restored {len(manifest)} entries from backup")
+                        return manifest
+                except json.JSONDecodeError:
+                    logger.error("Backup also corrupted")
+    
+    # Return empty manifest if nothing exists or all corrupted
+    logger.warning("No valid manifest found - starting fresh")
+    logger.info("Tip: Run cleanup.py after scraping to validate manifest")
     return {}
 
-def save_manifest(manifest):
-    """Write manifest.json at end of run."""
-    with open(manifest_path, "w") as f:
-        json.dump(manifest, f, indent=2)
+def save_manifest(manifest: Dict):
+    """
+    Atomically save manifest.json with backup.
+    Uses atomic write pattern: write to temp file, then rename.
+    """
+    # Create backup of existing manifest
+    if os.path.exists(manifest_path):
+        backup_path = f"{manifest_path}.bak"
+        try:
+            shutil.copy2(manifest_path, backup_path)
+            logger.debug(f"Created manifest backup")
+        except Exception as e:
+            logger.error(f"Failed to create manifest backup: {e}")
+    
+    # Write to temporary file first (atomic write pattern)
+    temp_fd, temp_path = tempfile.mkstemp(
+        dir=SAVE_DIR,
+        prefix=".manifest_",
+        suffix=".json.tmp"
+    )
+    
+    try:
+        with os.fdopen(temp_fd, 'w') as f:
+            json.dump(manifest, f, indent=2)
+        
+        # Atomic rename
+        shutil.move(temp_path, manifest_path)
+        logger.debug("Manifest saved atomically")
+        
+    except Exception as e:
+        # Clean up temp file on error
+        try:
+            os.unlink(temp_path)
+        except:
+            pass
+        logger.error(f"Failed to save manifest: {e}")
+        raise
 
 def clean_program_name(name):
     """Sanitize and truncate overly long folder names."""
@@ -112,7 +211,6 @@ def detect_program_from_filename(filename):
     """Detect program from filename as fallback."""
     filename_lower = filename.lower()
     
-    # Check each program pattern
     for key, val in PROGRAM_MAP.items():
         if key in filename_lower:
             return val
@@ -145,10 +243,8 @@ def parse_table_links(soup):
             if len(cells) < 2:
                 continue
             
-            # First cell typically has program name
             program_cell = cells[0].get_text(strip=True)
             
-            # Remaining cells have file links
             for cell in cells[1:]:
                 for link in cell.find_all("a", href=True):
                     href = link["href"]
@@ -157,15 +253,13 @@ def parse_table_links(soup):
                     
                     filename = href.split("/")[-1]
                     
-                    # Skip deprecated files
                     if should_skip_file(filename, program_cell):
-                        print(f"[TABLE] Skipping deprecated: {filename}")
+                        logger.debug(f"[TABLE] Skipping deprecated: {filename}")
                         continue
                     
                     full_url = urljoin(BASE_URL, href)
                     year = extract_year(filename)
                     
-                    # Detect program from table cell or filename
                     current_program = None
                     for key, val in PROGRAM_MAP.items():
                         if key in program_cell.lower() or key in filename.lower():
@@ -187,174 +281,217 @@ def parse_table_links(soup):
     
     return table_links
 
-# ---------------------------------------------------------------------
-# Scrape setup
-# ---------------------------------------------------------------------
-
-print(f"Fetching: {BASE_URL}")
-response = requests.get(BASE_URL)
-soup = BeautifulSoup(response.text, "html.parser")
-
-manifest = load_manifest()
-download_links = []
-current_program = None
-skip_mode = False
-
-# ---------------------------------------------------------------------
-# Parse HTML and collect download links
-# ---------------------------------------------------------------------
-
-# First, parse table-based links (Latest Quarterly Updates)
-table_links = parse_table_links(soup)
-print(f"Found {len(table_links)} files from tables.")
-download_links.extend(table_links)
-
-# Then parse ALL links on the page and intelligently categorize them
-print("\nScanning all links on page...")
-all_links = soup.find_all("a", href=True)
-
-for link in all_links:
-    href = link["href"]
-    href_lower = href.lower()
+def download_file_atomic(url: str, filepath: str) -> tuple:
+    """
+    Download file atomically to temporary location, then move to final location.
+    Returns (content, headers_dict) on success.
+    """
+    temp_fd, temp_path = tempfile.mkstemp(
+        dir=os.path.dirname(filepath),
+        prefix=".download_",
+        suffix=os.path.splitext(filepath)[1]
+    )
     
-    # Check if it's a valid file type
-    if not any(href_lower.endswith(ext) for ext in VALID_EXTS):
-        continue
-    
-    filename = href.split("/")[-1]
-    
-    # Skip deprecated files
-    if should_skip_file(filename):
-        continue
-    
-    # Try to detect program from filename
-    program = detect_program_from_filename(filename)
-    
-    # If no program detected, try to look at surrounding context
-    if not program:
-        # Look at parent elements for context
-        parent = link.find_parent(["td", "p", "li", "div"])
-        if parent:
-            context = parent.get_text(strip=True)
-            for key, val in PROGRAM_MAP.items():
-                if key in context.lower():
-                    program = val
-                    break
-    
-    # Look backwards in the document for the nearest heading
-    if not program:
-        # Find the nearest preceding heading
-        for prev in link.find_all_previous(["h2", "h3", "h4", "strong", "b"]):
-            text = prev.get_text(strip=True).lower()
-            for key, val in PROGRAM_MAP.items():
-                if key in text and "annual" not in text:
-                    program = val
-                    break
-            if program:
-                break
-    
-    if not program:
-        program = "Uncategorized"
-    
-    full_url = urljoin(BASE_URL, href)
-    normalized_url = normalize_url(full_url)
-    year = extract_year(filename)
-    
-    # Check if we already have this URL
-    if any(item["url"] == normalized_url for item in download_links):
-        continue
-    
-    download_links.append({
-        "program": program,
-        "url": normalized_url,
-        "filename": filename,
-        "year": year
-    })
-
-print(f"\nFound {len(download_links)} total downloadable files (excluding deprecated annual reports).")
-
-# ---------------------------------------------------------------------
-# Download files (with deduplication)
-# ---------------------------------------------------------------------
-
-downloaded_count = 0
-skipped_count = 0
-
-for item in download_links:
-    program = item["program"]
-    url = item["url"]
-    filename = item["filename"]
-    year = item["year"]
-
-    safe_program = clean_program_name(program)
-    
-    # Always use Program/Year/File hierarchy
-    program_dir = os.path.join(SAVE_DIR, safe_program)
-    year_dir = os.path.join(program_dir, year)
-    os.makedirs(year_dir, exist_ok=True)
-    filepath = os.path.join(year_dir, filename)
-
-    # skip if already in manifest and unchanged
-    if url in manifest:
-        try:
-            head = requests.head(url, timeout=10)
-            etag = head.headers.get("ETag")
-            last_modified = head.headers.get("Last-Modified")
-
-            cached = manifest[url]
-            if etag and cached.get("etag") == etag:
-                skipped_count += 1
-                continue
-            if last_modified and cached.get("last_modified") == last_modified:
-                skipped_count += 1
-                continue
-        except Exception:
-            skipped_count += 1
-            continue
-
-    # also skip if same file path already stored
-    if any(entry.get("saved_path") == filepath for entry in manifest.values()):
-        skipped_count += 1
-        continue
-
-    # download
-    print(f"Downloading ({safe_program}/{year}): {filename}")
     try:
         r = requests.get(url, timeout=30)
         r.raise_for_status()
-
-        with open(filepath, "wb") as f:
+        
+        # Write to temp file
+        with os.fdopen(temp_fd, 'wb') as f:
             f.write(r.content)
-
-        digest = hashlib.sha256(r.content).hexdigest()
-
-        manifest[url] = {
-            "program": safe_program,
-            "filename": filename,
-            "year": year,
-            "saved_path": filepath,
-            "sha256": digest,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "etag": r.headers.get("ETag"),
-            "last_modified": r.headers.get("Last-Modified"),
-        }
-
-        # save manifest immediately (so crash-safe)
-        save_manifest(manifest)
-        print(f"✓ Saved to: {filepath}")
-        downloaded_count += 1
-
+        
+        # Atomic move to final location
+        shutil.move(temp_path, filepath)
+        
+        return r.content, dict(r.headers)
+        
     except Exception as e:
-        print(f"✗ Failed to download {url}: {e}")
+        # Clean up temp file on error
+        try:
+            os.unlink(temp_path)
+        except:
+            pass
+        raise e
 
 # ---------------------------------------------------------------------
-# Wrap-up
+# Main Scraping Logic
 # ---------------------------------------------------------------------
 
-save_manifest(manifest)
-print(f"\n{'='*60}")
-print(f"Scrape completed!")
-print(f"Downloaded: {downloaded_count} files")
-print(f"Skipped: {skipped_count} files")
-print(f"Total in manifest: {len(manifest)} files")
-print(f"{'='*60}")
+def main():
+    logger.info("="*60)
+    logger.info(f"Starting scrape at {datetime.now()}")
+    logger.info("="*60)
+    
+    # Note about hash-based deduplication
+    logger.info("Note: Deduplication uses ETag/Last-Modified headers")
+    logger.info("Future improvement: Add hash-based dedup for identical files with different URLs")
+    logger.info("")
+    
+    logger.info(f"Fetching: {BASE_URL}")
+    try:
+        response = requests.get(BASE_URL, timeout=30)
+        response.raise_for_status()
+    except Exception as e:
+        logger.error(f"Failed to fetch main page: {e}")
+        return 1
+    
+    soup = BeautifulSoup(response.text, "html.parser")
+    
+    manifest = load_manifest()
+    download_links = []
+    
+    # Parse table-based links
+    logger.info("Parsing table-based links...")
+    table_links = parse_table_links(soup)
+    logger.info(f"Found {len(table_links)} files from tables")
+    download_links.extend(table_links)
+    
+    # Parse all links on page
+    logger.info("Scanning all links on page...")
+    all_links = soup.find_all("a", href=True)
+    
+    for link in all_links:
+        href = link["href"]
+        href_lower = href.lower()
+        
+        if not any(href_lower.endswith(ext) for ext in VALID_EXTS):
+            continue
+        
+        filename = href.split("/")[-1]
+        
+        if should_skip_file(filename):
+            continue
+        
+        program = detect_program_from_filename(filename)
+        
+        if not program:
+            parent = link.find_parent(["td", "p", "li", "div"])
+            if parent:
+                context = parent.get_text(strip=True)
+                for key, val in PROGRAM_MAP.items():
+                    if key in context.lower():
+                        program = val
+                        break
+        
+        if not program:
+            for prev in link.find_all_previous(["h2", "h3", "h4", "strong", "b"]):
+                text = prev.get_text(strip=True).lower()
+                for key, val in PROGRAM_MAP.items():
+                    if key in text and "annual" not in text:
+                        program = val
+                        break
+                if program:
+                    break
+        
+        if not program:
+            program = "Uncategorized"
+        
+        full_url = urljoin(BASE_URL, href)
+        normalized_url = normalize_url(full_url)
+        year = extract_year(filename)
+        
+        if any(item["url"] == normalized_url for item in download_links):
+            continue
+        
+        download_links.append({
+            "program": program,
+            "url": normalized_url,
+            "filename": filename,
+            "year": year
+        })
+    
+    logger.info(f"Found {len(download_links)} total downloadable files")
+    
+    # Download files
+    downloaded_count = 0
+    skipped_count = 0
+    failed_count = 0
+    
+    for item in download_links:
+        program = item["program"]
+        url = item["url"]
+        filename = item["filename"]
+        year = item["year"]
+        
+        safe_program = clean_program_name(program)
+        
+        program_dir = os.path.join(SAVE_DIR, safe_program)
+        year_dir = os.path.join(program_dir, year)
+        os.makedirs(year_dir, exist_ok=True)
+        filepath = os.path.join(year_dir, filename)
+        
+        # Check if we should skip this file
+        should_skip = False
+        
+        # Skip if URL in manifest and unchanged
+        if url in manifest:
+            try:
+                head = requests.head(url, timeout=10)
+                etag = head.headers.get("ETag")
+                last_modified = head.headers.get("Last-Modified")
+                
+                cached = manifest[url]
+                
+                if etag and cached.get("etag") == etag:
+                    logger.debug(f"Skipping (ETag match): {filename}")
+                    should_skip = True
+                elif last_modified and cached.get("last_modified") == last_modified:
+                    logger.debug(f"Skipping (Last-Modified match): {filename}")
+                    should_skip = True
+            except Exception as e:
+                logger.warning(f"HEAD request failed for {url}: {e}")
+                # If HEAD fails, check if file exists on disk
+                if os.path.exists(filepath):
+                    logger.debug(f"Skipping (file exists, HEAD failed): {filename}")
+                    should_skip = True
+        
+        # Skip if file path already exists in manifest (different URL, same file)
+        elif any(entry.get("saved_path") == filepath for entry in manifest.values()):
+            logger.debug(f"Skipping (path exists): {filepath}")
+            should_skip = True
+        
+        if should_skip:
+            skipped_count += 1
+            continue
+        
+        # Download
+        logger.info(f"Downloading ({safe_program}/{year}): {filename}")
+        try:
+            content, headers = download_file_atomic(url, filepath)
+            digest = hashlib.sha256(content).hexdigest()
+            
+            manifest[url] = {
+                "program": safe_program,
+                "filename": filename,
+                "year": year,
+                "saved_path": filepath,
+                "sha256": digest,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "etag": headers.get("ETag"),
+                "last_modified": headers.get("Last-Modified"),
+            }
+            
+            # Save manifest after each successful download
+            save_manifest(manifest)
+            logger.info(f"✓ Saved to: {filepath}")
+            downloaded_count += 1
+            
+        except Exception as e:
+            logger.error(f"✗ Failed to download {url}: {e}")
+            failed_count += 1
+    
+    # Final summary
+    logger.info("="*60)
+    logger.info("Scrape completed!")
+    logger.info(f"Downloaded: {downloaded_count} files")
+    logger.info(f"Skipped: {skipped_count} files")
+    logger.info(f"Failed: {failed_count} files")
+    logger.info(f"Total in manifest: {len(manifest)} files")
+    logger.info("")
+    logger.info("Tip: Run cleanup.py to validate manifest and remove stale entries")
+    logger.info("="*60)
+    
+    return 0 if failed_count == 0 else 1
+
+if __name__ == "__main__":
+    exit(main())

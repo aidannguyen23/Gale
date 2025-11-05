@@ -1,25 +1,33 @@
 """
 cron.py — Automates DOL data scraping on a recurring schedule.
 
-Features
+Features:
 - Runs scrape.py quarterly to match DOL update cycle
-- Streams logs to terminal AND a timestamped file
+- Integrates with scrape.py's built-in logging system
 - Retries with exponential backoff on failure
-- Deduplication via manifest.json handles everything
+- Cleans up old logs automatically
+- Sends notifications on persistent failures
+- Uses proper Python environment detection
 """
 
 import os
+import sys
 import time
 import schedule
 import subprocess
-from datetime import datetime
+import logging
+from datetime import datetime, timedelta
+from pathlib import Path
+import glob
 
 # --- Configuration ----------------------------------------------------
 
-PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
-SCRIPT_PATH = os.path.join(PROJECT_DIR, "scrape.py")
-LOG_DIR = os.path.join(PROJECT_DIR, "logs")
-os.makedirs(LOG_DIR, exist_ok=True)
+PROJECT_DIR = Path(__file__).parent.absolute()
+SCRIPT_PATH = PROJECT_DIR / "scrape.py"
+CLEANUP_SCRIPT_PATH = PROJECT_DIR / "cleanup.py"
+DATA_DIR = PROJECT_DIR / "data"
+LOG_DIR = DATA_DIR / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 # Backoff behavior on failure of scrape.py
 MAX_RETRIES = 5                # total attempts per scheduled run (1 initial + 4 retries)
@@ -31,77 +39,156 @@ RUN_AT_LOCAL = "07:00"         # local time
 QUARTERLY_MONTHS = [1, 4, 7, 10]  # Jan, Apr, Jul, Oct (after each quarter ends)
 RUN_DAY_OF_MONTH = 15          # Run mid-month to ensure DOL has published
 
+# Log retention (cleanup logs older than this)
+LOG_RETENTION_DAYS = 90        # Keep 3 months of logs
+
+# Cleanup schedule - run weekly to remove stale manifest entries
+CLEANUP_SCHEDULE_DAY = "monday"
+CLEANUP_TIME = "03:00"
+
+# --- Logging Setup ----------------------------------------------------
+
+def setup_cron_logging():
+    """Setup logging for the cron scheduler itself."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = LOG_DIR / f"cron_{timestamp}.log"
+    
+    logger = logging.getLogger("cron")
+    logger.setLevel(logging.DEBUG)
+    logger.handlers = []
+    
+    # File handler
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setLevel(logging.DEBUG)
+    file_formatter = logging.Formatter(
+        '%(asctime)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    file_handler.setFormatter(file_formatter)
+    
+    # Console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_formatter = logging.Formatter('%(message)s')
+    console_handler.setFormatter(console_formatter)
+    
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+    
+    logger.info(f"Cron logging to: {log_file}")
+    return logger
+
+logger = setup_cron_logging()
+
 # --- Helpers ----------------------------------------------------------
 
-def _open_log_file():
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    log_path = os.path.join(LOG_DIR, f"scrape_{timestamp}.log")
-    f = open(log_path, "w", encoding="utf-8")
-    return f, log_path
+def get_python_executable():
+    """Get the current Python executable path."""
+    return sys.executable
 
-def _stream_process(cmd, log_file):
+def cleanup_old_logs():
+    """Remove log files older than LOG_RETENTION_DAYS."""
+    cutoff_date = datetime.now() - timedelta(days=LOG_RETENTION_DAYS)
+    removed_count = 0
+    
+    logger.info(f"Cleaning up logs older than {LOG_RETENTION_DAYS} days...")
+    
+    for log_file in LOG_DIR.glob("*.log"):
+        try:
+            # Get file modification time
+            mtime = datetime.fromtimestamp(log_file.stat().st_mtime)
+            
+            if mtime < cutoff_date:
+                log_file.unlink()
+                removed_count += 1
+                logger.debug(f"Removed old log: {log_file.name}")
+        except Exception as e:
+            logger.warning(f"Failed to remove {log_file.name}: {e}")
+    
+    if removed_count > 0:
+        logger.info(f"Removed {removed_count} old log files")
+    else:
+        logger.info("No old logs to remove")
+
+def run_script_with_retry(script_path: Path, script_name: str):
     """
-    Run a subprocess and stream stdout+stderr line-by-line
-    to both terminal and the given log_file.
-    Returns the process returncode.
+    Run a script with retries and exponential backoff.
+    Returns True if successful, False if all retries exhausted.
     """
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Running: {' '.join(cmd)}")
-    log_file.write(f"COMMAND: {' '.join(cmd)}\n")
-    log_file.flush()
-
-    with subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-        universal_newlines=True,
-    ) as proc:
-        for line in proc.stdout:
-            print(line, end="")
-            log_file.write(line)
-        proc.wait()
-        return proc.returncode
-
-def run_scraper():
-    """
-    Run the scraper with retries and exponential backoff.
-    Streams output to terminal and log file.
-    """
-    start_ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    log_file, log_path = _open_log_file()
-    print(f"[{start_ts}] Starting scraper run… (logs: {log_path})")
-
-    try:
-        attempt = 0
-        while attempt < MAX_RETRIES:
-            attempt += 1
-            rc = _stream_process(["python3", SCRIPT_PATH], log_file)
-
-            if rc == 0:
-                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Scrape completed successfully.")
-                log_file.write("STATUS: success\n")
-                return
-
-            # Compute backoff for next attempt
-            sleep_seconds = min(BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)), BACKOFF_MAX_SECONDS)
-            print(
-                f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
-                f"Scrape failed (exit {rc}). Attempt {attempt}/{MAX_RETRIES}. "
-                f"Retrying in {sleep_seconds} seconds…"
+    python_exe = get_python_executable()
+    
+    logger.info(f"Starting {script_name}...")
+    logger.info(f"Command: {python_exe} {script_path}")
+    
+    attempt = 0
+    while attempt < MAX_RETRIES:
+        attempt += 1
+        
+        try:
+            # Run the script and capture output
+            # Note: scrape.py has its own logging, so we just capture exit code
+            result = subprocess.run(
+                [python_exe, str(script_path)],
+                capture_output=True,
+                text=True,
+                timeout=3600  # 1 hour timeout
             )
-            log_file.write(
-                f"STATUS: failure exit={rc}, attempt={attempt}/{MAX_RETRIES}, backoff={sleep_seconds}s\n"
+            
+            if result.returncode == 0:
+                logger.info(f"{script_name} completed successfully")
+                return True
+            
+            # Log failure details
+            logger.error(f"{script_name} failed with exit code {result.returncode}")
+            if result.stderr:
+                logger.error(f"Error output: {result.stderr[:500]}")  # First 500 chars
+            
+        except subprocess.TimeoutExpired:
+            logger.error(f"{script_name} timed out after 1 hour")
+        except Exception as e:
+            logger.error(f"{script_name} raised exception: {e}")
+        
+        # Calculate backoff for next attempt
+        if attempt < MAX_RETRIES:
+            sleep_seconds = min(
+                BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)), 
+                BACKOFF_MAX_SECONDS
             )
-            log_file.flush()
+            logger.warning(
+                f"Attempt {attempt}/{MAX_RETRIES} failed. "
+                f"Retrying in {sleep_seconds} seconds..."
+            )
             time.sleep(sleep_seconds)
+    
+    logger.error(f"All {MAX_RETRIES} retry attempts exhausted for {script_name}")
+    send_failure_notification(script_name)
+    return False
 
-        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] All retries exhausted. See log: {log_path}")
-        log_file.write("STATUS: exhausted\n")
-
-    finally:
-        log_file.close()
-        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Run finished. Log saved: {log_path}")
+def send_failure_notification(script_name: str):
+    """
+    Send notification about persistent script failure.
+    Implement your notification method here (email, Slack, PagerDuty, etc.)
+    """
+    message = (
+        f"ALERT: {script_name} failed after {MAX_RETRIES} attempts\n"
+        f"Time: {datetime.now()}\n"
+        f"Check logs in: {LOG_DIR}"
+    )
+    
+    # TODO: Implement actual notification (email, Slack, etc.)
+    logger.critical("="*60)
+    logger.critical("FAILURE NOTIFICATION")
+    logger.critical(message)
+    logger.critical("="*60)
+    
+    # Example: Write to a failure file that monitoring can pick up
+    failure_file = DATA_DIR / "SCRAPE_FAILURE.txt"
+    try:
+        with open(failure_file, 'w') as f:
+            f.write(message)
+        logger.info(f"Failure flag written to: {failure_file}")
+    except Exception as e:
+        logger.error(f"Failed to write failure flag: {e}")
 
 def should_run_quarterly():
     """
@@ -114,30 +201,86 @@ def should_run_quarterly():
 def run_scraper_if_quarter():
     """Only run if it's the scheduled quarterly day."""
     if should_run_quarterly():
-        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Quarterly run triggered.")
-        run_scraper()
+        logger.info("="*60)
+        logger.info("QUARTERLY SCRAPE TRIGGERED")
+        logger.info("="*60)
+        success = run_script_with_retry(SCRIPT_PATH, "scrape.py")
+        
+        if success:
+            # Clear any previous failure flags
+            failure_file = DATA_DIR / "SCRAPE_FAILURE.txt"
+            if failure_file.exists():
+                failure_file.unlink()
+                logger.info("Cleared previous failure flag")
     else:
-        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Not a quarterly run day. Skipping.")
+        logger.debug(f"Not a quarterly run day. Skipping. (Today: {datetime.now().strftime('%b %d')})")
 
-# --- Scheduling -------------------------------------------------------
+def run_cleanup():
+    """Run the cleanup script to remove stale manifest entries."""
+    logger.info("="*60)
+    logger.info("RUNNING CLEANUP SCRIPT")
+    logger.info("="*60)
+    
+    if not CLEANUP_SCRIPT_PATH.exists():
+        logger.warning(f"Cleanup script not found: {CLEANUP_SCRIPT_PATH}")
+        return
+    
+    run_script_with_retry(CLEANUP_SCRIPT_PATH, "cleanup.py")
 
-print("="*60)
-print("DOL Data Scraper - Quarterly Cron Scheduler")
-print("="*60)
-print(f"Schedule: {RUN_DAY_OF_MONTH}th of {QUARTERLY_MONTHS} at {RUN_AT_LOCAL}")
-print(f"Next quarters: Jan 15, Apr 15, Jul 15, Oct 15")
-print("="*60)
+def run_log_cleanup():
+    """Scheduled log cleanup task."""
+    logger.info("="*60)
+    logger.info("RUNNING LOG CLEANUP")
+    logger.info("="*60)
+    cleanup_old_logs()
 
-# Run immediately on startup (dedup will skip unchanged files)
-print("\nRunning initial scrape...")
-run_scraper()
+# --- Main Entry Point -------------------------------------------------
 
-# Schedule daily checks for quarterly runs
-schedule.every().day.at(RUN_AT_LOCAL).do(run_scraper_if_quarter)
+def main():
+    """Main scheduler loop."""
+    logger.info("="*60)
+    logger.info("DOL Data Scraper - Quarterly Cron Scheduler")
+    logger.info("="*60)
+    logger.info(f"Scrape Schedule: {RUN_DAY_OF_MONTH}th of {QUARTERLY_MONTHS} at {RUN_AT_LOCAL}")
+    logger.info(f"Cleanup Schedule: Every {CLEANUP_SCHEDULE_DAY.title()} at {CLEANUP_TIME}")
+    logger.info(f"Log Retention: {LOG_RETENTION_DAYS} days")
+    logger.info(f"Python: {get_python_executable()}")
+    logger.info("="*60)
+    
+    # Run initial scrape on startup (dedup will skip unchanged files)
+    logger.info("\nRunning initial scrape on startup...")
+    run_script_with_retry(SCRIPT_PATH, "scrape.py")
+    
+    # Schedule quarterly scrape checks
+    schedule.every().day.at(RUN_AT_LOCAL).do(run_scraper_if_quarter)
+    
+    # Schedule weekly cleanup of stale manifest entries
+    schedule_func = getattr(schedule.every(), CLEANUP_SCHEDULE_DAY)
+    schedule_func.at(CLEANUP_TIME).do(run_cleanup)
+    
+    # Schedule weekly log cleanup (same day as manifest cleanup, but 30 min later)
+    cleanup_log_time = (
+        datetime.strptime(CLEANUP_TIME, "%H:%M") + timedelta(minutes=30)
+    ).strftime("%H:%M")
+    schedule_func = getattr(schedule.every(), CLEANUP_SCHEDULE_DAY)
+    schedule_func.at(cleanup_log_time).do(run_log_cleanup)
+    
+    logger.info(f"\nScheduler active:")
+    logger.info(f"  - Daily check at {RUN_AT_LOCAL} for quarterly scrapes")
+    logger.info(f"  - {CLEANUP_SCHEDULE_DAY.title()} at {CLEANUP_TIME} for cleanup")
+    logger.info(f"  - {CLEANUP_SCHEDULE_DAY.title()} at {cleanup_log_time} for log cleanup")
+    logger.info("\nPress Ctrl+C to stop.\n")
+    
+    # Main loop
+    try:
+        while True:
+            schedule.run_pending()
+            time.sleep(60)  # Check every minute
+    except KeyboardInterrupt:
+        logger.info("\nScheduler stopped by user")
+    except Exception as e:
+        logger.exception(f"Scheduler crashed: {e}")
+        raise
 
-print(f"\nScheduler active. Checking daily at {RUN_AT_LOCAL} for quarterly runs.")
-
-# Main loop
-while True:
-    schedule.run_pending()
-    time.sleep(3600)  # Check every hour
+if __name__ == "__main__":
+    main()
