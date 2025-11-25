@@ -340,44 +340,46 @@ FINAL_SCHEMA = [
 # ---------------------------------------------------------
 ALIAS_MAP = {
     # ---------------------------------------------
-    # EMPLOYER NAME / BUSINESS NAME
+    # EMPLOYER NAME / BUSINESS NAME (OLD → NEW canonical per schema doc)
     # ---------------------------------------------
-    "employer_name": "employer_name",
-    "emp_business_name": "employer_name",
+    "employer_name": "emp_business_name",  # OLD → NEW canonical
+    "emp_business_name": "emp_business_name",  # NEW form (keep as is)
 
     # ---------------------------------------------
-    # EMPLOYER ADDRESS (OLD → CANONICAL)
+    # EMPLOYER ADDRESS (OLD → NEW canonical per schema doc)
     # ---------------------------------------------
-    "employer_address_1": "employer_addr1",
-    "employer_address_2": "employer_addr2",
-    "employer_city": "employer_city",
-    "employer_state_province": "employer_state_province",
-    "employer_postal_code": "employer_postal_code",
-    "employer_country": "employer_country",
-    "employer_phone": "employer_phone",
-    "employer_phone_ext": "employer_phone_ext",
-    "employer_num_employees": "employer_num_employees",
-    "employer_year_commenced_business": "employer_year_commenced_business",
-    "employer_fein": "employer_fein",
+    "employer_address_1": "emp_addr1",  # OLD → NEW canonical
+    "employer_address_2": "emp_addr2",  # OLD → NEW canonical
+    "employer_city": "emp_city",  # OLD → NEW canonical
+    "employer_state_province": "emp_state",  # OLD → NEW canonical
+    "employer_postal_code": "emp_postcode",  # OLD → NEW canonical
+    "employer_country": "emp_country",  # OLD → NEW canonical
+    "employer_phone": "emp_phone",  # OLD → NEW canonical
+    "employer_phone_ext": "emp_phoneext",  # OLD → NEW canonical
+    "employer_num_employees": "emp_num_payroll",  # OLD → NEW canonical
+    "employer_year_commenced_business": "emp_year_commenced",  # OLD → NEW canonical
+    "employer_fein": "emp_fein",  # OLD → NEW canonical
 
     # ---------------------------------------------
-    # EMPLOYER ADDRESS (NEW → CANONICAL)
+    # EMPLOYER ADDRESS (NEW form - keep as is)
     # ---------------------------------------------
-    "emp_addr1": "employer_addr1",
-    "emp_addr2": "employer_addr2",
-    "emp_city": "employer_city",
-    "emp_state": "employer_state_province",
-    "emp_postcode": "employer_postal_code",
-    "emp_country": "employer_country",
-    "emp_phone": "employer_phone",
-    "emp_phoneext": "employer_phone_ext",
-    "emp_fein": "employer_fein",
+    "emp_addr1": "emp_addr1",
+    "emp_addr2": "emp_addr2",
+    "emp_city": "emp_city",
+    "emp_state": "emp_state",
+    "emp_postcode": "emp_postcode",
+    "emp_country": "emp_country",
+    "emp_phone": "emp_phone",
+    "emp_phoneext": "emp_phoneext",
+    "emp_fein": "emp_fein",
+    "emp_num_payroll": "emp_num_payroll",
+    "emp_year_commenced": "emp_year_commenced",
 
     # ---------------------------------------------
-    # INDUSTRY CODES
+    # INDUSTRY CODES (OLD → NEW canonical)
     # ---------------------------------------------
-    "naics_code": "naics_code",
-    "emp_naics": "naics_code",
+    "naics_code": "emp_naics",  # OLD → NEW canonical
+    "emp_naics": "emp_naics",  # NEW form (keep as is)
 
     # ---------------------------------------------
     # PAYROLL SIZE
@@ -483,29 +485,29 @@ ALIAS_MAP = {
     "job_opp_wage_conditions": "job_opp_wage_conditions",
 
     # ---------------------------------------------
-    # WAGE OFFER (OLD)
+    # WAGE OFFER (OLD → NEW mapping per schema doc)
     # ---------------------------------------------
-    "wage_offer_from": "wage_offer_from",
-    "wage_offer_to": "wage_offer_to",
-    "wage_offer_unit_of_pay": "wage_offer_unit_of_pay",
+    "wage_offer_from": "job_opp_wage_from",  # OLD → NEW canonical
+    "wage_offer_to": "job_opp_wage_to",      # OLD → NEW canonical
+    "wage_offer_unit_of_pay": "job_opp_wage_unit_of_pay",  # OLD → NEW canonical
+    "job_opp_wage_from": "job_opp_wage_from",  # NEW form (keep as is)
+    "job_opp_wage_to": "job_opp_wage_to",      # NEW form (keep as is)
+    "job_opp_wage_unit_of_pay": "job_opp_wage_unit_of_pay",  # NEW form (keep as is)
 
     # ---------------------------------------------
-    # WORKSITE (OLD)
+    # WORKSITE (OLD → NEW mapping per schema doc)
     # ---------------------------------------------
-    "worksite_address_1": "worksite_address_1",
-    "worksite_address_2": "worksite_address_2",
-    "worksite_city": "worksite_city",
-    "worksite_state": "worksite_state",
-    "worksite_postal_code": "worksite_postal_code",
-
-    # ---------------------------------------------
-    # WORKSITE (NEW)
-    # ---------------------------------------------
-    "primary_worksite_addr1": "primary_worksite_addr1",
-    "primary_worksite_addr2": "primary_worksite_addr2",
-    "primary_worksite_city": "primary_worksite_city",
-    "primary_worksite_state": "primary_worksite_state",
-    "primary_worksite_postal_code": "primary_worksite_postal_code",
+    "worksite_address_1": "primary_worksite_addr1",      # OLD → NEW canonical
+    "worksite_address_2": "primary_worksite_addr2",      # OLD → NEW canonical
+    "worksite_city": "primary_worksite_city",            # OLD → NEW canonical
+    "worksite_state": "primary_worksite_state",           # OLD → NEW canonical (note: old was WORKSITE_STATE_PROVINCE)
+    "worksite_state_province": "primary_worksite_state",  # OLD variant
+    "worksite_postal_code": "primary_worksite_postal_code", # OLD → NEW canonical
+    "primary_worksite_addr1": "primary_worksite_addr1",   # NEW form (keep as is)
+    "primary_worksite_addr2": "primary_worksite_addr2",  # NEW form (keep as is)
+    "primary_worksite_city": "primary_worksite_city",     # NEW form (keep as is)
+    "primary_worksite_state": "primary_worksite_state",   # NEW form (keep as is)
+    "primary_worksite_postal_code": "primary_worksite_postal_code",  # NEW form (keep as is)
     "primary_worksite_county": "primary_worksite_county",
     "primary_worksite_bls_area": "primary_worksite_bls_area",
     "primary_worksite_type": "primary_worksite_type",
@@ -562,10 +564,15 @@ def clean_and_map(df, year, form_type):
     df = df[[c for c in df.columns if c]]
 
     # Apply alias mapping
+    # Only map if the old column exists and new column doesn't already have data
     for old, new in ALIAS_MAP.items():
         if old in df.columns:
-            df[new] = df[old]
-            df = df.drop(columns=[old], errors="ignore")
+            # Only overwrite if new column doesn't exist or is all null
+            if new not in df.columns or df[new].isna().all():
+                df[new] = df[old]
+            # Drop old column only if it's different from new
+            if old != new:
+                df = df.drop(columns=[old], errors="ignore")
 
     # Add year + form_type
     df["year"] = year
@@ -582,7 +589,7 @@ def enforce_final_schema(df):
 
     # Create a block of missing columns all at once
     if missing:
-        df = pd.concat([df, pd.DataFrame({c: [None] * len(df) for c in missing})], axis=1)
+        df = pd.concat([df, pd.DataFrame({c: [pd.NA] * len(df) for c in missing})], axis=1)
 
     # Reorder exactly to FINAL_SCHEMA
     df = df[FINAL_SCHEMA]
@@ -592,52 +599,221 @@ def enforce_final_schema(df):
     return df
 
 # ---------------------------------------------------------
+# 7.5. Clean data values (whitespace, case, numeric, dates)
+# ---------------------------------------------------------
+def clean_data_values(df):
+    """
+    Apply basic cleaning to the dataframe:
+    - Strip whitespace from string columns
+    - Standardize case for certain columns
+    - Convert numeric columns
+    - Convert date columns
+    """
+    df = df.copy()
+    
+    # Strip whitespace in string columns
+    for col in df.select_dtypes(include=["object"]).columns:
+        if df[col].dtype == "object":
+            df[col] = df[col].astype(str).str.strip()
+            # Replace 'nan' strings and empty strings with actual NA
+            df[col] = df[col].replace(["nan", "None", "N/A", "n/a", "", "NULL", "null"], pd.NA)
+    
+    # Standardize case for case_status and other status fields
+    status_columns = ["case_status", "occupation_type", "professional_occupation"]
+    for col in status_columns:
+        if col in df.columns:
+            df[col] = df[col].astype(str).str.upper().replace(["NAN", "NONE"], pd.NA)
+    
+    # Convert numeric columns
+    numeric_columns = [
+        "pw_wage", "wage_offer_from", "wage_offer_to",
+        "job_opp_wage_from", "job_opp_wage_to",
+        "emp_num_payroll", "employer_num_employees", "emp_year_commenced", "employer_year_commenced_business",
+        "required_training_months", "required_experience_months",
+        "accept_alt_occupation_months", "accept_alt_combo_education_yrs",
+        "foreign_worker_yrs_ed_comp", "pw_skill_level",
+        "emp_fein", "employer_fein", "naics_code", "emp_naics"
+    ]
+    for col in numeric_columns:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    
+    # Convert date columns
+    date_columns = [
+        "received_date", "decision_date", "orig_file_date",
+        "pw_determination_date", "pw_expiration_date",
+        "swa_job_order_start_date", "swa_job_order_end_date",
+        "first_advertisement_start_date", "second_ad_start_date",
+        "job_fair_from_date", "job_fair_to_date",
+        "on_campus_recruiting_from_date", "on_campus_recruiting_to_date",
+        "employer_website_from_date", "employer_website_to_date",
+        "pro_org_ad_from_date", "pro_org_advertisement_to_date",
+        "job_search_website_from_date", "job_search_website_to_date",
+        "pvt_employment_firm_from_date", "pvt_employment_firm_to_date",
+        "employee_ref_prog_from_date", "employee_referral_prog_to_date",
+        "campus_placement_from_date", "campus_placement_to_date",
+        "local_ethnic_paper_from_date", "local_ethnic_paper_to_date",
+        "radio_tv_ad_from_date", "radio_tv_ad_to_date",
+        "teacher_select_date",
+        "recr_info_job_start_date", "recr_info_job_end_date",
+        "recr_info_ad_date1", "recr_info_ad_date2",
+        "recr_occ_job_fair_from", "recr_occ_job_fair_to",
+        "recr_occ_emp_website_from", "recr_occ_emp_website_to",
+        "recr_occ_job_search_from", "recr_occ_job_search_to",
+        "recr_occ_on_campus_from", "recr_occ_on_campus_to",
+        "recr_occ_trade_org_from", "recr_occ_trade_org_to",
+        "recr_occ_private_emp_from", "recr_occ_private_emp_to",
+        "recr_occ_emp_referral_from", "recr_occ_emp_referral_to",
+        "recr_occ_campus_placement_from", "recr_occ_campus_placement_to",
+        "recr_occ_local_newspaper_from", "recr_occ_local_newspaper_to",
+        "recr_occ_radio_ad_from", "recr_occ_radio_ad_to"
+    ]
+    for col in date_columns:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce")
+    
+    return df
+
+# ---------------------------------------------------------
 # 8. Main compiler
 # ---------------------------------------------------------
 def compile_perm():
 
+    print("=" * 60)
+    print("PERM Data Compilation Script")
+    print("=" * 60)
+    print(f"Base path: {BASE_PATH}")
+    
+    if not os.path.exists(BASE_PATH):
+        print(f"ERROR: Base path does not exist: {BASE_PATH}")
+        print("Please ensure data files are available.")
+        return
+    
     all_rows = []
+    processed_files = []
+    skipped_files = []
 
     for year in sorted(os.listdir(BASE_PATH)):
         year_path = os.path.join(BASE_PATH, year)
         if not os.path.isdir(year_path):
             continue
 
+        print(f"\n--- Processing year: {year} ---")
+
         for fname in os.listdir(year_path):
             if not fname.endswith(".xlsx"):
                 continue
 
             full_path = os.path.join(year_path, fname)
-            print("\nLoading:", full_path)
+            print(f"\nLoading: {fname}")
 
-            form_type = detect_form_type(fname, year)
+            try:
+                form_type = detect_form_type(fname, year)
+                print(f"  Detected form type: {form_type}")
 
-            df = load_perm_file(full_path)
-            if df is None:
+                df = load_perm_file(full_path)
+                if df is None:
+                    skipped_files.append(full_path)
+                    continue
+
+                print(f"  Initial shape: {df.shape[0]} rows, {df.shape[1]} columns")
+
+                # Normalize column names
+                df.columns = normalize_columns(df.columns)
+                
+                # Clean and map columns
+                df = clean_and_map(df, year, form_type)
+                
+                # Enforce final schema (add missing columns)
+                df = enforce_final_schema(df)
+                
+                # Apply data cleaning
+                df = clean_data_values(df)
+                
+                print(f"  Final shape: {df.shape[0]} rows, {df.shape[1]} columns")
+                print(f"  ✓ Successfully processed")
+
+                all_rows.append(df)
+                processed_files.append(full_path)
+                
+            except Exception as e:
+                print(f"  ✗ ERROR processing {fname}: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                skipped_files.append(full_path)
                 continue
 
-            df.columns = normalize_columns(df.columns)
-            df = clean_and_map(df, year, form_type)
-            df = enforce_final_schema(df)
+    if not all_rows:
+        print("\n" + "=" * 60)
+        print("ERROR: No files were successfully processed!")
+        print(f"Skipped files: {len(skipped_files)}")
+        print("=" * 60)
+        return
 
-            all_rows.append(df)
-
+    print("\n" + "=" * 60)
+    print("Concatenating all dataframes...")
     final = pd.concat(all_rows, ignore_index=True)
+    print(f"Combined shape: {final.shape[0]} rows, {final.shape[1]} columns")
 
     # Deduplicate by case_number
     if "case_number" in final.columns:
+        print("\nDeduplicating by case_number...")
+        initial_count = len(final)
         final["case_number"] = final["case_number"].astype(str).str.upper()
-        final = final.drop_duplicates(subset=["case_number"])
+        final = final.drop_duplicates(subset=["case_number"], keep="first")
+        duplicates_removed = initial_count - len(final)
+        print(f"  Removed {duplicates_removed} duplicate case numbers")
+
+    # Apply final cleaning pass
+    print("\nApplying final data cleaning...")
+    final = clean_data_values(final)
+
+    # Sanity checks and logging
+    print("\n" + "=" * 60)
+    print("SANITY CHECKS")
+    print("=" * 60)
+    print(f"Number of files processed: {len(processed_files)}")
+    print(f"Number of files skipped: {len(skipped_files)}")
+    print(f"Total rows in final dataframe: {len(final):,}")
+    print(f"Total columns: {len(final.columns)}")
+    
+    # Check for missing critical columns
+    critical_columns = ["case_number", "year", "form_type"]
+    missing_critical = [col for col in critical_columns if col not in final.columns]
+    if missing_critical:
+        print(f"⚠️  WARNING: Missing critical columns: {missing_critical}")
+    else:
+        print("✓ All critical columns present")
+    
+    # Show data types summary
+    print("\nData types summary:")
+    dtype_counts = final.dtypes.value_counts()
+    for dtype, count in dtype_counts.items():
+        print(f"  {dtype}: {count} columns")
+    
+    # Show sample of data
+    print("\nFirst few rows:")
+    print(final.head())
+    
+    # Show column list (first 20)
+    print(f"\nColumns ({len(final.columns)} total):")
+    for i, col in enumerate(final.columns[:20], 1):
+        print(f"  {i}. {col}")
+    if len(final.columns) > 20:
+        print(f"  ... and {len(final.columns) - 20} more columns")
 
     # Output CSV
     outpath = os.path.join(PROJECT_ROOT, "perm_db.csv")
+    print(f"\nSaving to: {outpath}")
     final.to_csv(outpath, index=False)
-
-    print("\n--------------------------------------------------")
-    print("Saved unified PERM dataset to:", outpath)
-    print("Rows:", len(final))
-    print("Columns:", len(final.columns))
-    print("--------------------------------------------------")
+    
+    print("\n" + "=" * 60)
+    print("✓ COMPILATION COMPLETE")
+    print("=" * 60)
+    print(f"Output file: {outpath}")
+    print(f"Final rows: {len(final):,}")
+    print(f"Final columns: {len(final.columns)}")
+    print("=" * 60)
 
 
 if __name__ == "__main__":
