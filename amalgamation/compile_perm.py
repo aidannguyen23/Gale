@@ -1466,13 +1466,25 @@ def normalize_columns(cols):
     return cols.str.strip().str.lower().str.replace(" ", "_").str.replace("-", "_")
 
 def detect_mapping_key(year, filename):
-    filename = filename.lower()
-    if year in [2024, 2025]:
-        if "new_form" in filename:
-            return f"{year}_new"
-        else:
-            return f"{year}_old"
+    fname = filename.lower()
+
+    # Explicit overrides
+    if "old_form" in fname:
+        return f"{year}_old"
+    if "new_form" in fname:
+        return f"{year}_new"
+
+    # Year-based defaults:
+    if year == 2024:
+        # In 2024, default = OLD
+        return "2024_old"
+
+    if year >= 2025:
+        # In 2025+, default = NEW
+        return f"{year}_new"
+
     return str(year)
+
 
 def ensure_final_schema(df):
     """Fast: add missing FINAL_SCHEMA columns via one concat, preventing fragmentation."""
