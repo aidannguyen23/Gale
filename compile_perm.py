@@ -603,9 +603,12 @@ def enforce_final_schema(df):
 # ---------------------------------------------------------
 def clean_data_values(df):
     """
-    Apply basic cleaning to the dataframe:
+    Apply comprehensive cleaning to the dataframe:
     - Strip whitespace from string columns
     - Standardize case for certain columns
+    - Clean NAICS codes (remove .0 suffix)
+    - Format phone numbers consistently
+    - Normalize multiple spaces in text fields
     - Convert numeric columns
     - Convert date columns
     """
@@ -617,6 +620,33 @@ def clean_data_values(df):
             df[col] = df[col].astype(str).str.strip()
             # Replace 'nan' strings and empty strings with actual NA
             df[col] = df[col].replace(["nan", "None", "N/A", "n/a", "", "NULL", "null"], pd.NA)
+    
+    # Normalize multiple spaces in text fields (fix "Data  Scientist" -> "Data Scientist")
+    text_columns = ["job_title", "emp_business_name", "emp_trade_name", "job_info_alt_occ_job_title"]
+    for col in text_columns:
+        if col in df.columns:
+            df[col] = df[col].astype(str).str.replace(r'\s+', ' ', regex=True).str.strip()
+            df[col] = df[col].replace(["nan", "None", "N/A", ""], pd.NA)
+    
+    # Clean NAICS codes: remove .0 suffix (e.g., "621340.0" -> "621340")
+    naics_columns = ["emp_naics", "naics_code"]
+    for col in naics_columns:
+        if col in df.columns:
+            df[col] = df[col].astype(str).str.replace(r'\.0+$', '', regex=True)
+            df[col] = df[col].replace(["nan", "None", ""], pd.NA)
+    
+    # Format phone numbers: standardize to 10 digits (remove leading 1 if 11 digits)
+    phone_columns = ["emp_phone", "emp_phoneext", "emp_poc_phone", "emp_poc_phoneext", 
+                     "atty_ag_phone", "atty_ag_phone_ext", "foreign_worker_phone", 
+                     "foreign_worker_phone_ext"]
+    for col in phone_columns:
+        if col in df.columns:
+            # Remove non-digit characters first
+            df[col] = df[col].astype(str).str.replace(r'[^\d]', '', regex=True)
+            # Remove leading 1 if 11 digits (US country code)
+            df[col] = df[col].apply(lambda x: x[1:] if pd.notna(x) and len(str(x)) == 11 and str(x)[0] == '1' else x)
+            # Set to NA if empty or invalid length
+            df[col] = df[col].apply(lambda x: pd.NA if pd.isna(x) or str(x) == '' or str(x) == 'nan' or (len(str(x)) != 10 and len(str(x)) != 0) else x)
     
     # Standardize case for case_status and other status fields
     status_columns = ["case_status", "occupation_type", "professional_occupation"]
@@ -637,6 +667,13 @@ def clean_data_values(df):
     for col in numeric_columns:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
+    
+    # Convert NAICS codes to integers (no decimal point in CSV)
+    naics_int_columns = ["emp_naics", "naics_code"]
+    for col in naics_int_columns:
+        if col in df.columns:
+            # Convert to nullable integer type
+            df[col] = df[col].astype('Int64')
     
     # Convert date columns
     date_columns = [
