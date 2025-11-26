@@ -1,7 +1,9 @@
 import os
 import pandas as pd
 
-BASE_PATH = "data/PERM Program"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)  # Parent directory (root)
+BASE_PATH = os.path.join(PROJECT_ROOT, "data", "PERM Program")
 
 def convert_all_excels():
     for year in os.listdir(BASE_PATH):
