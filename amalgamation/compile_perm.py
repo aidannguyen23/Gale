@@ -1501,6 +1501,68 @@ def ensure_final_schema(df):
     return df[FINAL_SCHEMA]
 
 
+def clean_data_values(df):
+    """
+    Apply comprehensive cleaning to the dataframe:
+    - Strip whitespace from string columns
+    - Clean NAICS codes (remove .0 suffix, convert to integer)
+    - Format phone numbers consistently (10 digits)
+    - Normalize multiple spaces in text fields
+    - Standardize case for status fields
+    """
+    df = df.copy()
+    
+    # Strip whitespace in string columns
+    for col in df.select_dtypes(include=["object"]).columns:
+        if df[col].dtype == "object":
+            df[col] = df[col].astype(str).str.strip()
+            # Replace 'nan' strings and empty strings with actual NA
+            df[col] = df[col].replace(["nan", "None", "N/A", "n/a", "", "NULL", "null"], pd.NA)
+    
+    # Normalize multiple spaces in text fields (fix "Data  Scientist" -> "Data Scientist")
+    text_columns = ["JOB_TITLE", "EMP_BUSINESS_NAME", "EMP_TRADE_NAME"]
+    for col in text_columns:
+        if col in df.columns:
+            df[col] = df[col].astype(str).str.replace(r'\s+', ' ', regex=True).str.strip()
+            df[col] = df[col].replace(["nan", "None", "N/A", ""], pd.NA)
+    
+    # Clean NAICS codes: remove .0 suffix and convert to integer
+    naics_columns = ["EMP_NAICS"]
+    for col in naics_columns:
+        if col in df.columns:
+            # Convert to string first to handle any numeric types
+            df[col] = df[col].astype(str)
+            # Remove .0 suffix if present
+            df[col] = df[col].str.replace(r'\.0+$', '', regex=True)
+            df[col] = df[col].replace(["nan", "None", ""], pd.NA)
+            # Convert to nullable integer type (only if not NA)
+            df[col] = pd.to_numeric(df[col], errors="coerce").astype('Int64')
+    
+    # Format phone numbers: standardize to 10 digits (remove leading 1 if 11 digits)
+    phone_columns = ["EMP_PHONE", "EMP_PHONEEXT", "EMP_POC_PHONE", "EMP_POC_PHONEEXT", 
+                     "ATTY_AG_PHONE", "ATTY_AG_PHONE_EXT"]
+    for col in phone_columns:
+        if col in df.columns:
+            # Convert to string, handling both numeric and string types
+            df[col] = df[col].astype(str)
+            # Remove .0 suffix if present (from numeric conversion like 3129156000.0)
+            df[col] = df[col].str.replace(r'\.0+$', '', regex=True)
+            # Remove non-digit characters (dashes, parentheses, spaces, etc.)
+            df[col] = df[col].str.replace(r'[^\d]', '', regex=True)
+            # Remove leading 1 if 11 digits (US country code)
+            df[col] = df[col].apply(lambda x: x[1:] if pd.notna(x) and str(x) != 'nan' and len(str(x)) == 11 and str(x)[0] == '1' else x)
+            # Set to NA if empty or invalid length, otherwise keep as string (not numeric)
+            df[col] = df[col].apply(lambda x: pd.NA if pd.isna(x) or str(x) == '' or str(x) == 'nan' or (len(str(x)) != 10 and len(str(x)) != 0) else str(x))
+    
+    # Standardize case for case_status and other status fields
+    status_columns = ["CASE_STATUS", "OCCUPATION_TYPE"]
+    for col in status_columns:
+        if col in df.columns:
+            df[col] = df[col].astype(str).str.upper().replace(["NAN", "NONE"], pd.NA)
+    
+    return df
+
+
 # ---------------------------------------------------------
 # MAIN PROCESSING
 # ---------------------------------------------------------
@@ -1575,7 +1637,24 @@ def compile_perm():
     logger.info("Deduplicating...")
     final = final.drop_duplicates(subset=["CASE_NUMBER"], keep="first")
     
+    # Apply data cleaning
+    logger.info("Cleaning data values...")
+    final = clean_data_values(final)
+    
     logger.info(f"\nFinal: {len(final):,} rows")
+    
+    # Convert NAICS to string before saving (to avoid .0 in CSV)
+    if "EMP_NAICS" in final.columns:
+        final["EMP_NAICS"] = final["EMP_NAICS"].astype(str).replace("nan", "")
+        final["EMP_NAICS"] = final["EMP_NAICS"].replace("", pd.NA)
+    
+    # Ensure phone numbers are strings (not numeric) before saving
+    phone_cols = ["EMP_PHONE", "EMP_PHONEEXT", "EMP_POC_PHONE", "EMP_POC_PHONEEXT", 
+                   "ATTY_AG_PHONE", "ATTY_AG_PHONE_EXT"]
+    for col in phone_cols:
+        if col in final.columns:
+            final[col] = final[col].astype(str).replace("nan", "")
+            final[col] = final[col].replace("", pd.NA)
     
     # Save
     output = os.path.join(PROJECT_ROOT, "perm_db.csv")
